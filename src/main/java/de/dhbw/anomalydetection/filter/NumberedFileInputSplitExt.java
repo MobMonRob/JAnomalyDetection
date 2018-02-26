@@ -1,19 +1,10 @@
 package de.dhbw.anomalydetection.filter;
 
-import org.datavec.api.util.files.UriFromPathIterator;
-import org.datavec.api.writable.WritableType;
-
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.io.File;
 
 import java.util.List;
 import java.util.ArrayList;
