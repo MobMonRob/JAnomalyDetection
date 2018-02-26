@@ -1,4 +1,4 @@
-package de.dhbw.anomalydetection.filter;
+package de.dhbw.anomalydetection.filter.json;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;

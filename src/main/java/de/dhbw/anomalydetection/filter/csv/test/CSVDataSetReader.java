@@ -1,5 +1,6 @@
-package de.dhbw.anomalydetection.filter;
+package de.dhbw.anomalydetection.filter.csv.test;
 
+import de.dhbw.anomalydetection.filter.NumberedFileInputSplitExt;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
