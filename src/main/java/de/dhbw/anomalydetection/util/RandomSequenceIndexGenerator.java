@@ -18,7 +18,7 @@ public class RandomSequenceIndexGenerator {
       this.windowSize = windowSize;
     }
     
-    public int[] getNextSequenz(){
+    public int[] getNextSequence(){
          boolean[] used = new boolean[windowSize];
          for (int i=0;i<windowSize;i++){
              used[i] = false;
