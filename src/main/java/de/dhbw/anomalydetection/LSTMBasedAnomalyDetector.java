@@ -436,7 +436,12 @@ public class LSTMBasedAnomalyDetector {
    }*/
    
    
-   
+   /**
+    * 
+    * @throws FileNotFoundException
+    * @throws IOException
+    * @throws InterruptedException 
+    */
    public static void singleStepsTest() throws FileNotFoundException, IOException, InterruptedException {
      
         CSVDataReader data = new CSVDataReader(TEST_WINDOW_SIZE); 
