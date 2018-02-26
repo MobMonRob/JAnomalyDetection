@@ -1,6 +1,5 @@
 package de.dhbw.anomalydetection.util;
 
-import java.util.PrimitiveIterator.OfInt;
 import java.util.Random;
 
 /**
