@@ -312,7 +312,6 @@ public class LSTMBasedAnomalyDetector {
                     // windows eines batches durchiterieren
                     double[][][] randomData = new double[MINI_BATCH_SIZE][dim][SLIDING_WINDOW_SIZE];
                     int[] randomIndizes = r.getNextSequence();
-                    int index = 0;
                     for (int index=0;index < MINI_BATCH_SIZE; index++){
                         int randomIndex = randomIndizes[index];
                         for (int d=0;d<dim;d++){
