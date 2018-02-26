@@ -1,7 +1,8 @@
 package de.dhbw.anomalydetection;
 
 import de.dhbw.anomalydetection.util.PlotUtils;
-import de.dhbw.anomalydetection.filter.CSVDataReader;
+import de.dhbw.anomalydetection.filter.csv.CSVDataReader;
+import de.dhbw.anomalydetection.util.RandomSequenceIndexGenerator;
 import java.util.Random;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
@@ -17,9 +18,6 @@ import org.deeplearning4j.nn.weights.WeightInit;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
 
-import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
-
-import edu.emory.mathcs.jtransforms.fft.DoubleFFT_1D;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import org.deeplearning4j.api.storage.StatsStorage;
@@ -31,19 +29,15 @@ import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.factory.Nd4j;
         
 import org.deeplearning4j.ui.api.UIServer;
-import org.deeplearning4j.util.ModelSerializer;
 
 import java.io.File;
 
 import java.util.List;
-import java.util.ArrayList;
-import org.jfree.data.xy.XYSeries;
 
 import org.nd4j.linalg.util.ArrayUtil;
 
 import org.apache.commons.math3.stat.StatUtils;
 
-import org.deeplearning4j.eval.Evaluation;
 import org.deeplearning4j.nn.conf.BackpropType;
 
 /**
@@ -74,15 +68,19 @@ public class LSTMBasedAnomalyDetector {
    // more precise results.
    private static final double learningRate = 0.2; // ehemals 0.01 bei keras 0.2 da %
         
-   // bei Silvan 600
-   private static final int WINDOW_SIZE = 340; //560; //350; //560; //35; //70; //140; //280; // 560 ist alles, bis 60% ohne anomalie
+   private static final int EPOCHS = 3;
+   private static final int SLIDING_WINDOW_SIZE = 100;
+   private static final int MINI_BATCH_SIZE = 50;
+   
+   // bei Silvan 700 als kurz nach dem Überfahren des ersten Hubbels
+   private static final int TRIAL_WINDOW_SIZE = 560; //560; //350; //560; //35; //70; //140; //280; // 560 ist alles, bis 60% ohne anomalie
    private static final int TEST_WINDOW_SIZE = 550; 
    private static final long MINIMUM_COUNT_OF_TRAINING_WINDOWS = 23; //212; //106; //52; //26; // count of training frames before start to score
    
    private static long windowsTrained; // count of trained windows
    private static int frameIndex = 0; // processed frame index inside a window
    
-   private static int currentWindow; // the index of the current processed window in a file
+   private static int currentTrial; 
    
    private static int dim; // dimensionality of the input data, defined by the JsonDataMovingWindow     
       
@@ -97,7 +95,7 @@ public class LSTMBasedAnomalyDetector {
    private org.deeplearning4j.nn.layers.variational.VariationalAutoencoder vae;
    
    public static void main(String[] args) throws FileNotFoundException, IOException, InterruptedException {
-       for (int epoch = 0;epoch < 50;epoch++){ // 80
+       for (int epoch = 0;epoch < EPOCHS;epoch++){ // 80
             //net.rnnClearPreviousState(); // clear previous state
             train();
             windowsTrained = 0 ;
@@ -257,27 +255,127 @@ public class LSTMBasedAnomalyDetector {
    /**
     * Process data files with collected data.
     * 
+    * Read TRIAL_WINDOW_SIZE frames from each file. Move a window of size SLIDING_WINDOW_SIZE 
+    * over the data and save the frames for each step.
+    * 
     * @throws FileNotFoundException
     * @throws IOException 
     * @throws java.lang.InterruptedException 
     */
    public static void train() throws FileNotFoundException, IOException, InterruptedException {
-        CSVDataReader data = new CSVDataReader(WINDOW_SIZE); 
+        CSVDataReader data = new CSVDataReader(TRIAL_WINDOW_SIZE); 
             
         if (detector == null){
             dim = data.getDimension();
             detector = new LSTMBasedAnomalyDetector(dim); 
         }
         // vielleicht besser durch einen Circularbuffer ersetzen?
-        double[][] window = new double[dim][WINDOW_SIZE];
+        double[][] window = new double[dim][TRIAL_WINDOW_SIZE];
 
-        currentWindow = 0;
+        currentTrial = 0;
+        
+        // über die frames der Trainingsdaten (aller input Dateien) iterieren
+        while (data.hasNext()){
+            double[] frame = data.next();
+
+            if (frameIndex < TRIAL_WINDOW_SIZE){
+                //System.arraycopy(frame, 0, window[frameIndex], 0, dim);
+                for (int i=0;i<dim;i++){
+                    window[i][frameIndex] = frame[i];
+                }
+                frameIndex++;
+            } else {
+                // 1. count of sliding windows, 2. dims, 3. sliding window size
+                double[][][] multidimwindow = new double[TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE][dim][SLIDING_WINDOW_SIZE];
+                
+                // sliding windows durchiterieren
+                for (int w=0;w<TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE;w++){
+                    // dimensions durchiterieren
+                    for (int i=0;i<dim;i++){
+                        // frames eines sliding windows durchiterieren
+                        for (int f=0;f<SLIDING_WINDOW_SIZE;f++){
+                            multidimwindow[w][i][f] = window[i][w+f];
+                        }
+                    }
+                }
+                
+                
+                // mini batch size berücksichtigen
+                // windows durcheinanderwürfeln
+                
+                RandomSequenceIndexGenerator r = new RandomSequenceIndexGenerator(MINI_BATCH_SIZE);
+                
+                // batches durchiterieren
+                int completeBatches = (TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE)/MINI_BATCH_SIZE;
+                for (int i=0; i < completeBatches; i++){
+                    
+                    // windows eines batches durchiterieren
+                    double[][][] randomData = new double[MINI_BATCH_SIZE][dim][SLIDING_WINDOW_SIZE];
+                    int[] randomIndizes = r.getNextSequence();
+                    int index = 0;
+                    for (int index=0;index < MINI_BATCH_SIZE; index++){
+                        int randomIndex = randomIndizes[index];
+                        for (int d=0;d<dim;d++){
+                            for (int f=0;f<SLIDING_WINDOW_SIZE;f++){
+                                randomData[index][d][f] = multidimwindow[MINI_BATCH_SIZE*index+randomIndex][d][f];
+                            }
+                        }
+                    }
+                    
+                    detector.train(randomData, data.getFileName());
+                    System.out.println(data.getFileName()+": batch "+i+"!");
+                }
+                
+                // die restlichen trial windows zu einem batch zusammenfassen
+                // TODO Reihenfolge hier auch noch durchwürfeln
+                int REST_MINI_BATCH_SIZE = TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE // Zahl der Windows
+                        - completeBatches * MINI_BATCH_SIZE;
+                double[][][] randomData = new double[REST_MINI_BATCH_SIZE][dim][SLIDING_WINDOW_SIZE];
+                for (int index = 0; index < REST_MINI_BATCH_SIZE;index++){
+                    for (int d=0;d<dim;d++){
+                        for (int f=0;f<SLIDING_WINDOW_SIZE;f++){
+                            randomData[index][d][f] = multidimwindow[completeBatches*MINI_BATCH_SIZE + index][d][f];
+                        }
+                    }
+                }
+                
+                
+                // score für das komplette Zeitfenster
+                detector.train(randomData, data.getFileName());
+                System.out.println(data.getFileName()+": batch "+completeBatches+"!");
+                
+                frameIndex = 0;
+                currentTrial++;
+            }
+        }
+        frameIndex = 0;
+        currentTrial = 0;
+   }
+   
+   /**
+    * Process data files with collected data.
+    * 
+    * @throws FileNotFoundException
+    * @throws IOException 
+    * @throws java.lang.InterruptedException 
+    */
+   public static void trainOld() throws FileNotFoundException, IOException, InterruptedException {
+        CSVDataReader data = new CSVDataReader(TRIAL_WINDOW_SIZE); 
+            
+        if (detector == null){
+            dim = data.getDimension();
+            detector = new LSTMBasedAnomalyDetector(dim); 
+        }
+        // vielleicht besser durch einen Circularbuffer ersetzen?
+        double[][] window = new double[dim][TRIAL_WINDOW_SIZE];
+
+        currentTrial = 0;
         
         // über die frames einer Datei iterieren
         while (data.hasNext()){
             double[] frame = data.next();
 
-            if (frameIndex < WINDOW_SIZE){
+            if (frameIndex < TRIAL_WINDOW_SIZE){
                 //System.arraycopy(frame, 0, window[frameIndex], 0, dim);
                 for (int i=0;i<dim;i++){
                     window[i][frameIndex] = frame[i];
@@ -286,11 +384,11 @@ public class LSTMBasedAnomalyDetector {
             } else {
                 // das ist alles nur nötig, wenn ich fft auf einem fenster machen will
                 // sonst könnte ich auch einfach window[][] statt multdimwindow[][][] übergeben
-                double[][][] multidimwindow = new double[1][dim][WINDOW_SIZE];
+                double[][][] multidimwindow = new double[1][dim][TRIAL_WINDOW_SIZE];
                 for (int i=0;i<dim;i++){
                     double[] array = window[i];
                     //double[] fftWindow = fft(array);
-                    for (int f=0;f<WINDOW_SIZE;f++){
+                    for (int f=0;f<TRIAL_WINDOW_SIZE;f++){
                         // mit fft
                         //multidimwindow[i][f] = fftWindow[f];
                         // ohne fft
@@ -299,22 +397,22 @@ public class LSTMBasedAnomalyDetector {
                 }
                 
                 // score für das komplette Zeitfenster
-                double score = detector.applyWindow(multidimwindow, data.getFileName());
-                System.out.println(data.getFileName()+": window "+currentWindow+
-                        ", score/frame = "+String.valueOf(score/WINDOW_SIZE));
+                //double score = detector.applyWindow(multidimwindow, data.getFileName());
+                //System.out.println(data.getFileName()+": window "+currentWindow+
+                //        ", score/frame = "+String.valueOf(score/TRIAL_WINDOW_SIZE));
                 frameIndex = 0;
-                currentWindow++;
+                currentTrial++;
             }
         }
         frameIndex = 0;
-        currentWindow = 0;
+        currentTrial = 0;
    }
    
    /**
     * Normalize by subtraction of the trials mean and division by std.
     * 
-    * @param multidimwindow [1][dim][WINDOW_SIZE]
-    * @return [1][dim][WINDOW_SIZE]
+    * @param multidimwindow [1][dim][TRIAL_WINDOW_SIZE]
+    * @return [1][dim][TRIAL_WINDOW_SIZE]
     */
    private void normalize(double[][][] multidimwindow){
        for (int d=0;d<multidimwindow[0].length;d++){
@@ -380,7 +478,7 @@ public class LSTMBasedAnomalyDetector {
                 PlotUtils.createChart(data.getFileName(), plot, new String[]{"orig", "score"});
                 //System.out.println(data.getFileName()+": window "+currentWindow+", score = "+score);
                 frameIndex = 0;
-                currentWindow++;
+                currentTrial++;
             }
         }
    }
@@ -463,8 +561,36 @@ public class LSTMBasedAnomalyDetector {
         return fft;
    }*/
    
+    /**
+    * Train the net.
+    *
+    * @param window [min batch size][dim][windowsize]
+    * Jede Zeile hat so viele Werte wie die Fensterbreite festlegt, es könnte 
+    * 3 Spalten geben, je eine für eine der 3 Dimensionen eines Beschleunigungssensors, 
+    * ausserdem gibt es eine dimension für die Zahl der examples.
+    * @param fileName
+    * 
+    */
+   public void train(double[][][] window, String fileName){
+      normalize(window);
+      double[] flat = ArrayUtil.flattenDoubleArray(window);
+      int[] shape = new int[]{window.length, window[0].length, window[0][0].length};	
+      INDArray input = Nd4j.create(flat,shape,'c');
+      
+      // inputdata, expected output values, or labels
+      // eigentlich müssten die labels um einen frame verschoben werden
+      // aber vermutlich macht das keinen Unterschied.
+      net.fit(input, input);
+      windowsTrained++;
+      double[][] plotwindow = new double[1][window[0][0].length];
+      for (int f=0;f<window[0][0].length;f++){
+        plotwindow[0][f] = window[0][0][f];
+      }
+      //PlotUtils.createChart(fileName, plotwindow, new String[]{"orig"});
+    }
+   
    /**
-    * Train the net and if the net is trained additionlly determine a score for 
+    * Train the net and if the net is trained additionally determine a score for 
     * the complete time window.
     *
     * @param window [1][dim][windowsize]
@@ -476,7 +602,7 @@ public class LSTMBasedAnomalyDetector {
     * 
     * @return -1, if the net is not yet trained enough, else the score
     */
-   public double applyWindow(double[][][] window, String fileName){
+   public double applyWindowOld(double[][][] window, String fileName){
       double result = -1;
       normalize(window);
       double[] flat = ArrayUtil.flattenDoubleArray(window);
