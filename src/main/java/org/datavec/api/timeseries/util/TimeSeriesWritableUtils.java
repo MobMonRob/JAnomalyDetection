@@ -13,7 +13,7 @@ import org.nd4j.linalg.primitives.Pair;
 
 import java.util.Iterator;
 import java.util.List;
-import java.util.Random;
+//import java.util.Random;
 
 /**
  * Simple utils for converting {@link Writable} s
@@ -71,6 +71,7 @@ public class TimeSeriesWritableUtils {
      * and also return the
      * mask array (if necessary)
      * @param timeSeriesRecord the input time series
+     * @return 
      *
      */
     public static Pair<INDArray, INDArray> convertWritablesSequence(List<List<List<Writable>>> timeSeriesRecord) {
@@ -82,6 +83,9 @@ public class TimeSeriesWritableUtils {
      * to a sequence (3d) data set,
      * and also return the
      * mask array (if necessary)
+     * @param list
+     * @param details
+     * @return 
      */
     public static Pair<INDArray, INDArray> convertWritablesSequence(List<List<List<Writable>>> list,
                                                                     RecordDetails details) {
@@ -89,7 +93,7 @@ public class TimeSeriesWritableUtils {
 
         INDArray arr;
 
-        if (list.get(0).size() == 0) {
+        if (list.get(0).isEmpty()) {
             throw new ZeroLengthSequenceException("Zero length sequence encountered");
         }
 

@@ -11,6 +11,15 @@ public class RandomSequenceIndexGenerator {
     private final java.util.PrimitiveIterator.OfInt it;
     private final int windowSize;
     
+    public static void main(String[] args){
+        RandomSequenceIndexGenerator r = new RandomSequenceIndexGenerator(50);
+        int[] values = r.getNextSequence();
+        for (int i=0;i<50;i++){
+            System.out.println(String.valueOf(values[i]));
+        }
+        System.out.println("count = "+String.valueOf(values.length));
+    }
+    
     // PrimitiveIterator.OfInt randomIterator = new Random().ints(0, TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE).iterator();
     public RandomSequenceIndexGenerator(int windowSize){
       it = new Random().ints(0, windowSize).iterator();

@@ -1,7 +1,7 @@
 package de.dhbw.anomalydetection;
 
-import de.dhbw.anomalydetection.util.PlotUtils;
 import de.dhbw.anomalydetection.filter.csv.CSVDataReader;
+import de.dhbw.anomalydetection.util.MathUtils;
 import de.dhbw.anomalydetection.util.RandomSequenceIndexGenerator;
 import java.util.Random;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
@@ -25,20 +25,18 @@ import org.deeplearning4j.ui.stats.StatsListener;
 import org.deeplearning4j.ui.storage.InMemoryStatsStorage;
 
 import org.nd4j.linalg.api.ndarray.INDArray;
-import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.factory.Nd4j;
         
 import org.deeplearning4j.ui.api.UIServer;
 
 import java.io.File;
 
-import java.util.List;
 
 import org.nd4j.linalg.util.ArrayUtil;
 
-import org.apache.commons.math3.stat.StatUtils;
 
 import org.deeplearning4j.nn.conf.BackpropType;
+import org.deeplearning4j.util.ModelSerializer;
 
 /**
  * Note: The training and anomaly detection is taking place at the same time, 
@@ -56,7 +54,7 @@ import org.deeplearning4j.nn.conf.BackpropType;
  * 
  * @author Oliver Rettig (based on the IoTAnomalyExampleLSTMFFTWatsonIoT of Romeo Kienzler) 
  */
-public class LSTMBasedAnomalyDetector {
+public class AnomalyDetectorTrain {
     
    // Random number generator seed, for reproducability
    private static final int seed = 12345;
@@ -66,16 +64,15 @@ public class LSTMBasedAnomalyDetector {
    // through the search space. The typical value of the learning rate is between 
    // 0.001 and 0.1. Smaller steps mean longer training times, but can lead to 
    // more precise results.
-   private static final double learningRate = 0.2; // ehemals 0.01 bei keras 0.2 da %
+   private static final double learningRate = 0.2; // 0.01 bei keras  // 0.2 hat bei VAE funktioniert
         
-   private static final int EPOCHS = 3;
+   private static final int EPOCHS = 5;
    private static final int SLIDING_WINDOW_SIZE = 100;
    private static final int MINI_BATCH_SIZE = 50;
    
    // bei Silvan 700 als kurz nach dem Überfahren des ersten Hubbels
-   private static final int TRIAL_WINDOW_SIZE = 560; //560; //350; //560; //35; //70; //140; //280; // 560 ist alles, bis 60% ohne anomalie
-   private static final int TEST_WINDOW_SIZE = 550; 
-   private static final long MINIMUM_COUNT_OF_TRAINING_WINDOWS = 23; //212; //106; //52; //26; // count of training frames before start to score
+   private static final int TRIAL_WINDOW_SIZE = 350; //560; //350; //560; //35; //70; //140; //280; // 560 ist alles, bis 60% ohne anomalie
+   //private static final long MINIMUM_COUNT_OF_TRAINING_WINDOWS = 23; //212; //106; //52; //26; // count of training frames before start to score
    
    private static long windowsTrained; // count of trained windows
    private static int frameIndex = 0; // processed frame index inside a window
@@ -85,22 +82,23 @@ public class LSTMBasedAnomalyDetector {
    private static int dim; // dimensionality of the input data, defined by the JsonDataMovingWindow     
       
    // Zahl der nodes an den Enden des variational autoencoders
-   private static final int RANGE_NODES_COUNT = 512; // ursprünglich 10
+   private static final int RANGE_NODES_COUNT = SLIDING_WINDOW_SIZE; // 512; // ursprünglich 10
+   
+   private static final double DROPOUT_VALUE = 0.2d;
    
    private static MultiLayerNetwork net;
-   private static LSTMBasedAnomalyDetector detector;
+   private static AnomalyDetectorTrain detector;
       
    private final Random rng = new Random(seed);
    
    private org.deeplearning4j.nn.layers.variational.VariationalAutoencoder vae;
    
    public static void main(String[] args) throws FileNotFoundException, IOException, InterruptedException {
-       for (int epoch = 0;epoch < EPOCHS;epoch++){ // 80
+       for (int epoch = 0;epoch < EPOCHS;epoch++){ 
             //net.rnnClearPreviousState(); // clear previous state
-            train();
+            train(epoch);
             windowsTrained = 0 ;
        }
-       singleStepsTest();
        while(true);
    }
    
@@ -166,40 +164,96 @@ public class LSTMBasedAnomalyDetector {
    }
    
    private void buildAutoencoder(int channels){
-       MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder()
+       MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder() // MultiLayerNetwork entspricht Keras model = Sequential()
         .seed(12345)
         // Generally, you want to use multiple epochs and one iteration (.iterations(1) option) 
         // when training; multiple iterations are generally only used when doing 
         // full-batch training on very small data sets.        
         .iterations(1)
-        .weightInit(WeightInit.ZERO) // vergleich mit Silvans code ZERO
-        .updater(Updater.RMSPROP) // for RMSProp
+        .weightInit(WeightInit.XAVIER) // vergleich mit Silvans code ZERO
+        .updater(Updater.ADAGRAD) // for RMSProp in keras
+        .activation(Activation.TANH)
         //.activation("relu")
-        .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT) // rmsprop bei keras
+        .optimizationAlgo(OptimizationAlgorithm.LINE_GRADIENT_DESCENT/*STOCHASTIC_GRADIENT_DESCENT*/) // rmsprop bei keras
         .learningRate(learningRate)
 
         .regularization(false) // false bei keras
         // Lamda regularisation constant as discussed here:
         // http://ufldl.stanford.edu/wiki/index.php/Backpropagation_Algorithm
-        .l2(0.0001)
-        .miniBatch(false) // neu: unklar ob es das bringt, da sample size klein
+        //.l2(0.0001)
+        .miniBatch(true) // neu: unklar ob es das bringt, da sample size klein
         .list()
                
-               //.gateActivationFunction(Activation.HARDSIGMOID)
-               // scheint nicht zu funktionieren-->score wird NaN
-        .layer(0, new GravesLSTM.Builder().activation(Activation.TANH).nIn(channels).nOut(64)//.gateActivationFunction(Activation.HARDSIGMOID)
-          .build())
-        .layer(1, new GravesLSTM.Builder().activation(Activation.TANH).nIn(64).nOut(256)//.gateActivationFunction(Activation.HARDSIGMOID)
-          .build())
-        .layer(2, new GravesLSTM.Builder().activation(Activation.TANH).nIn(256).nOut(100)//.gateActivationFunction(Activation.HARDSIGMOID)
-          .build())
+        //.gateActivationFunction(Activation.HARDSIGMOID)
+        // in keras entspricht das recurrent_activation
+        .layer(0, new GravesLSTM.Builder().activation(Activation.TANH).nIn(channels).nOut(64).gateActivationFunction(Activation.HARDSIGMOID)
+          .dropOut(DROPOUT_VALUE).build())
+        .layer(1, new GravesLSTM.Builder().activation(Activation.TANH).nIn(64).nOut(256).gateActivationFunction(Activation.HARDSIGMOID)
+          .dropOut(DROPOUT_VALUE).build())
+        .layer(2, new GravesLSTM.Builder().activation(Activation.TANH).nIn(256).nOut(100).gateActivationFunction(Activation.HARDSIGMOID)
+          .dropOut(DROPOUT_VALUE).build())
+               
         //.layer(3, new DenseLayer.Builder().nIn(100).nOut(100).activation(Activation.RELU).build())
                  
         // Output layer ist bereits ein DenseLayer
         // score and error calculation (of prediction vs. actual), given a loss function etc. 
         // The RnnOutputLayer layer type does not have any internal state, as it 
         // does not have any recurrent connections.
-        .layer(3, new RnnOutputLayer.Builder(LossFunctions.LossFunction.MSE)
+        .layer(3, new RnnOutputLayer.Builder() // MSE in keras
+          .activation(Activation.IDENTITY).nIn(100).nOut(channels).lossFunction(LossFunctions.LossFunction.MSE).build())
+               
+        // seems to be mandatory
+        // according to agibsonccc: You typically only use that with
+        // pretrain(true) when you want to do pretrain/finetune without changing
+        // the previous layers finetuned weights that's for autoencoders and
+        // rbms
+        // folgendes hier gefunden: https://github.com/deeplearning4j/dl4j-examples/blob/master/dl4j-examples/src/main/java/org/deeplearning4j/examples/unsupervised/variational/VariationalAutoEncoderExample.java
+        // layerwise pretraining not supported from LSTM
+        .pretrain(false).backprop(true)
+        .backpropType(BackpropType.TruncatedBPTT)
+        .tBPTTForwardLength(100)
+        .tBPTTBackwardLength(100).build();
+       
+        net = new MultiLayerNetwork(conf);
+        net.init();
+   }
+   
+   private void buildAutoencoder2(int channels){
+       MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder() // MultiLayerNetwork entspricht Keras model = Sequential()
+        .seed(12345)
+        // Generally, you want to use multiple epochs and one iteration (.iterations(1) option) 
+        // when training; multiple iterations are generally only used when doing 
+        // full-batch training on very small data sets.        
+        .iterations(1)
+        .weightInit(WeightInit.ZERO) // vergleich mit Silvans code ZERO
+        .updater(Updater.RMSPROP) // for RMSProp in keras
+        //.activation("relu")
+        .optimizationAlgo(OptimizationAlgorithm.LINE_GRADIENT_DESCENT/*STOCHASTIC_GRADIENT_DESCENT*/) // rmsprop bei keras
+        .learningRate(learningRate)
+
+        .regularization(false) // false bei keras
+        // Lamda regularisation constant as discussed here:
+        // http://ufldl.stanford.edu/wiki/index.php/Backpropagation_Algorithm
+        //.l2(0.0001)
+        .miniBatch(true) // neu: unklar ob es das bringt, da sample size klein
+        .list()
+               
+        //.gateActivationFunction(Activation.HARDSIGMOID)
+        // in keras entspricht das recurrent_activation
+        .layer(0, new GravesLSTM.Builder().activation(Activation.TANH).nIn(channels).nOut(64).gateActivationFunction(Activation.HARDSIGMOID)
+          .dropOut(DROPOUT_VALUE).build())
+        .layer(1, new GravesLSTM.Builder().activation(Activation.TANH).nIn(64).nOut(256).gateActivationFunction(Activation.HARDSIGMOID)
+          .dropOut(DROPOUT_VALUE).build())
+        .layer(2, new GravesLSTM.Builder().activation(Activation.TANH).nIn(256).nOut(100).gateActivationFunction(Activation.HARDSIGMOID)
+          .dropOut(DROPOUT_VALUE).build())
+               
+        //.layer(3, new DenseLayer.Builder().nIn(100).nOut(100).activation(Activation.RELU).build())
+                 
+        // Output layer ist bereits ein DenseLayer
+        // score and error calculation (of prediction vs. actual), given a loss function etc. 
+        // The RnnOutputLayer layer type does not have any internal state, as it 
+        // does not have any recurrent connections.
+        .layer(3, new RnnOutputLayer.Builder(LossFunctions.LossFunction.MSE) // MSE in keras
           .activation(Activation.IDENTITY).nIn(100).nOut(channels).build())
                
         // seems to be mandatory
@@ -208,6 +262,7 @@ public class LSTMBasedAnomalyDetector {
         // the previous layers finetuned weights that's for autoencoders and
         // rbms
         // folgendes hier gefunden: https://github.com/deeplearning4j/dl4j-examples/blob/master/dl4j-examples/src/main/java/org/deeplearning4j/examples/unsupervised/variational/VariationalAutoEncoderExample.java
+        // layerwise pretraining not supported from LSTM
         .pretrain(false).backprop(true)
         .backpropType(BackpropType.TruncatedBPTT)
         .tBPTTForwardLength(100)
@@ -222,7 +277,7 @@ public class LSTMBasedAnomalyDetector {
     * 
     * @param channels dimensionality of the data
     */
-   private LSTMBasedAnomalyDetector(int channels){
+   private AnomalyDetectorTrain(int channels){
        
         //buildVAENet(channels);
         buildAutoencoder(channels);
@@ -258,16 +313,17 @@ public class LSTMBasedAnomalyDetector {
     * Read TRIAL_WINDOW_SIZE frames from each file. Move a window of size SLIDING_WINDOW_SIZE 
     * over the data and save the frames for each step.
     * 
+    * @param epoch
     * @throws FileNotFoundException
     * @throws IOException 
     * @throws java.lang.InterruptedException 
     */
-   public static void train() throws FileNotFoundException, IOException, InterruptedException {
+   public static void train(int epoch) throws FileNotFoundException, IOException, InterruptedException {
         CSVDataReader data = new CSVDataReader(TRIAL_WINDOW_SIZE); 
             
         if (detector == null){
             dim = data.getDimension();
-            detector = new LSTMBasedAnomalyDetector(dim); 
+            detector = new AnomalyDetectorTrain(dim); 
         }
         // vielleicht besser durch einen Circularbuffer ersetzen?
         double[][] window = new double[dim][TRIAL_WINDOW_SIZE];
@@ -307,6 +363,7 @@ public class LSTMBasedAnomalyDetector {
                 
                 // batches durchiterieren
                 int completeBatches = (TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE)/MINI_BATCH_SIZE;
+                System.out.println("Complete batches "+String.valueOf(completeBatches));
                 for (int i=0; i < completeBatches; i++){
                     
                     // windows eines batches durchiterieren
@@ -314,110 +371,47 @@ public class LSTMBasedAnomalyDetector {
                     int[] randomIndizes = r.getNextSequence();
                     for (int index=0;index < MINI_BATCH_SIZE; index++){
                         int randomIndex = randomIndizes[index];
+                        //System.out.println("index="+String.valueOf(MINI_BATCH_SIZE*index+randomIndex));
                         for (int d=0;d<dim;d++){
                             for (int f=0;f<SLIDING_WINDOW_SIZE;f++){
-                                randomData[index][d][f] = multidimwindow[MINI_BATCH_SIZE*index+randomIndex][d][f];
+                                randomData[index][d][f] = multidimwindow[i*MINI_BATCH_SIZE+randomIndex][d][f];
                             }
                         }
                     }
                     
-                    detector.train(randomData, data.getFileName());
-                    System.out.println(data.getFileName()+": batch "+i+"!");
+                    double score = detector.train(randomData, data.getFileName());
+                    System.out.println(data.getFileName()+": epoch = "+String.valueOf(epoch)+"("+String.valueOf(EPOCHS)+") batch "+i+" score = "+String.valueOf(score)+"!");
                 }
                 
                 // die restlichen trial windows zu einem batch zusammenfassen
                 // TODO Reihenfolge hier auch noch durchwürfeln
                 int REST_MINI_BATCH_SIZE = TRIAL_WINDOW_SIZE-SLIDING_WINDOW_SIZE // Zahl der Windows
-                        - completeBatches * MINI_BATCH_SIZE;
-                double[][][] randomData = new double[REST_MINI_BATCH_SIZE][dim][SLIDING_WINDOW_SIZE];
-                for (int index = 0; index < REST_MINI_BATCH_SIZE;index++){
-                    for (int d=0;d<dim;d++){
-                        for (int f=0;f<SLIDING_WINDOW_SIZE;f++){
-                            randomData[index][d][f] = multidimwindow[completeBatches*MINI_BATCH_SIZE + index][d][f];
+                        - (completeBatches * MINI_BATCH_SIZE);
+                if (REST_MINI_BATCH_SIZE > 0){
+                    int[] randomIndizes = (new RandomSequenceIndexGenerator(REST_MINI_BATCH_SIZE)).getNextSequence();
+                    double[][][] randomData = new double[REST_MINI_BATCH_SIZE][dim][SLIDING_WINDOW_SIZE];
+                    for (int index = 0; index < REST_MINI_BATCH_SIZE;index++){
+                        int randomIndex = randomIndizes[index];
+                        for (int d=0;d<dim;d++){
+                            for (int f=0;f<SLIDING_WINDOW_SIZE;f++){
+                                randomData[index][d][f] = multidimwindow[completeBatches*MINI_BATCH_SIZE + randomIndex][d][f];
+                            }
                         }
                     }
+                    double score = detector.train(randomData, data.getFileName());
+                    System.out.println(data.getFileName()+": epoch= "+String.valueOf(epoch)+"("+String.valueOf(EPOCHS)+") batch "+completeBatches+" score = "+String.valueOf(score)+"!");
                 }
-                
-                
-                // score für das komplette Zeitfenster
-                detector.train(randomData, data.getFileName());
-                System.out.println(data.getFileName()+": batch "+completeBatches+"!");
-                
                 frameIndex = 0;
                 currentTrial++;
             }
         }
         frameIndex = 0;
         currentTrial = 0;
+        saveModel(new File("anomalydetection.zip"), net);
+        //ModelSerializer.writeModel(net, new File("anomalydetection.zip"), false);
    }
    
-   /**
-    * Process data files with collected data.
-    * 
-    * @throws FileNotFoundException
-    * @throws IOException 
-    * @throws java.lang.InterruptedException 
-    */
-   public static void trainOld() throws FileNotFoundException, IOException, InterruptedException {
-        CSVDataReader data = new CSVDataReader(TRIAL_WINDOW_SIZE); 
-            
-        if (detector == null){
-            dim = data.getDimension();
-            detector = new LSTMBasedAnomalyDetector(dim); 
-        }
-        // vielleicht besser durch einen Circularbuffer ersetzen?
-        double[][] window = new double[dim][TRIAL_WINDOW_SIZE];
-
-        currentTrial = 0;
-        
-        // über die frames einer Datei iterieren
-        while (data.hasNext()){
-            double[] frame = data.next();
-
-            if (frameIndex < TRIAL_WINDOW_SIZE){
-                //System.arraycopy(frame, 0, window[frameIndex], 0, dim);
-                for (int i=0;i<dim;i++){
-                    window[i][frameIndex] = frame[i];
-                }
-                frameIndex++;
-            } else {
-                // das ist alles nur nötig, wenn ich fft auf einem fenster machen will
-                // sonst könnte ich auch einfach window[][] statt multdimwindow[][][] übergeben
-                double[][][] multidimwindow = new double[1][dim][TRIAL_WINDOW_SIZE];
-                for (int i=0;i<dim;i++){
-                    double[] array = window[i];
-                    //double[] fftWindow = fft(array);
-                    for (int f=0;f<TRIAL_WINDOW_SIZE;f++){
-                        // mit fft
-                        //multidimwindow[i][f] = fftWindow[f];
-                        // ohne fft
-                        multidimwindow[0][i][f] = array[f];
-                    }
-                }
-                
-                // score für das komplette Zeitfenster
-                //double score = detector.applyWindow(multidimwindow, data.getFileName());
-                //System.out.println(data.getFileName()+": window "+currentWindow+
-                //        ", score/frame = "+String.valueOf(score/TRIAL_WINDOW_SIZE));
-                frameIndex = 0;
-                currentTrial++;
-            }
-        }
-        frameIndex = 0;
-        currentTrial = 0;
-   }
    
-   /**
-    * Normalize by subtraction of the trials mean and division by std.
-    * 
-    * @param multidimwindow [1][dim][TRIAL_WINDOW_SIZE]
-    * @return [1][dim][TRIAL_WINDOW_SIZE]
-    */
-   private void normalize(double[][][] multidimwindow){
-       for (int d=0;d<multidimwindow[0].length;d++){
-            multidimwindow[0][d] = StatUtils.normalize(multidimwindow[0][d]);
-       }
-   }
    
    /*DataNormalization train2(){
        DataSetIterator trainData = (new CSVDataSetReader()).getDataSetIterator();
@@ -434,137 +428,9 @@ public class LSTMBasedAnomalyDetector {
        
        return normalizer;
    }*/
+  
    
-   
-   /**
-    * 
-    * @throws FileNotFoundException
-    * @throws IOException
-    * @throws InterruptedException 
-    */
-   public static void singleStepsTest() throws FileNotFoundException, IOException, InterruptedException {
-     
-        CSVDataReader data = new CSVDataReader(TEST_WINDOW_SIZE); 
-        double[][] window = new double[dim][TEST_WINDOW_SIZE];
-        double[][] window2 = new double[dim][TEST_WINDOW_SIZE];
-        
-        // über die frames aller Dateien iterieren, eventuell wird bei einer Datei
-        // bereits vor Ende abgebrochen
-        while (data.hasNext()){
-            String currentFileName = data.getFileName(); // beim ersten frame des ersten trials "unknown file"
-            double[] frame = data.next();
-
-            if (frameIndex < window[0].length && frameIndex < data.getCurrentFileRows()){
-                    for (int i=0;i<dim;i++){
-                        window[i][frameIndex] = frame[i];
-                        window2[i][frameIndex] = frame[i];
-                    }
-                    frameIndex++;
-            } else {
-                if (window[0].length != data.getCurrentFileRows()){
-                    System.out.println("The file \""+currentFileName+"\" has "+
-                            data.getCurrentFileRows()+" rows, but windowsize is "+String.valueOf(TEST_WINDOW_SIZE));
-                }
-                double[][] result = detector.scoreTimeSerieWindow(window);
-                double[][] plot = new double[2][window[0].length];
-                // alle frames eines windows durchiterieren
-                double max0 = -Double.MAX_VALUE;
-                double max1 = -Double.MAX_VALUE;
-                for (int i=0;i<window[0].length;i++){
-                    plot[0][i] = window2[0][i];
-                    plot[1][i] = result[0][i];
-                    if (plot[0][i] > max0) max0 = plot[0][i];
-                    if (plot[1][i] > max1) max1 = plot[1][i];
-                }
-                /*for (int i=0;i<window[0].length;i++){
-                    plot[1][i] *= max0/max1; 
-                }*/
-                PlotUtils.createChart(data.getFileName(), plot, new String[]{"orig", "score"});
-                //System.out.println(data.getFileName()+": window "+currentWindow+", score = "+score);
-                frameIndex = 0;
-                currentTrial++;
-            }
-        }
-   }
-   /**
-    * Process a timeserie window step by step to determine a score for each timestep.
-    * 
-    * siehe Beispiel für runTimeStep() und RNN networks:<br>
-    * http://progur.com/2017/06/how-to-create-lstm-rnn-deeplearning4j.html<p>
-    * 
-    * @param timeSerieWindow [dims][frames]
-    * @return score[dims][frames]
-    */
-   private double[][] scoreTimeSerieWindow(double[][] timeSerieWindow){
-        double[][] result = new double[timeSerieWindow.length][timeSerieWindow[0].length];
-        net.rnnClearPreviousState();
-        // frames durchiterieren
-        for (int f=0;f<timeSerieWindow[0].length;f++){
-            // multiple rows (dimension 0 in the input data) are used for multiple examples.
-            // For a single time step prediction: the data is 2 dimensional, 
-            // with shape [numExamples,nIn]; in this case, the output is also 2 
-            // dimensional, with shape [numExamples,nOut]
-            // For multiple time step predictions: the data is 3 dimensional, 
-            // with shape [numExamples,nIn,numTimeSteps]; the output will have 
-            // shape [numExamples,nOut,numTimeSteps]. 
-            double[][] step = new double[1][timeSerieWindow.length]; // 1, dim=1
-            // iteration over dim
-            for (int i=0;i<timeSerieWindow.length;i++){
-                step[0][i] = timeSerieWindow[i][f];
-            }
-            // returns output activations for the current frame
-            // output for the rnnTimeStep and the output/feedForward methods 
-            // should be identical (for each time step), whether we make these 
-            // predictions all at once (output/feedForward) or whether these 
-            // predictions are generated one or more steps at a time (rnnTimeStep). 
-            // Thus, the only difference should be the computational cost.
-            // https://github.com/deeplearning4j/dl4j-examples/blob/master/dl4j-examples/src/main/java/org/deeplearning4j/examples/recurrent/encdec/EncoderDecoderLSTM.java
-            INDArray values = net.rnnTimeStep(Nd4j.create(step));
-            
-            if (vae == null){
-                // ob das mit mehreren Dimensionen wirklich auch geht ist noch zu testen
-                //FIXME
-                for (int i=0;i<timeSerieWindow.length;i++){
-                    // https://github.com/IsaacChanghau/StockPrediction/blob/master/src/main/java/com/isaac/stock/predict/StockPricePrediction.java
-                    // getDouble(index des letzten Werts der Zeitreihe?)
-                    result[i][f] = values.getDouble(i); 
-                }
-            } else {
-                // vae.score(); scheint immer 0 zu sein
-                
-                // nicht verwendbar, der Sinn eines VAE ist ja gerade nach der Wahrscheinlichkeit
-                // der Rekonstruktion zu fragen und nicht nach dem Rekontrstruktionsfehler
-                //INDArray values = vae.reconstructionError(Nd4j.create(step)); 
-
-                //TODO genau das brauche ich 
-                // Argument ist vermutlich die Aktivierung oder der input
-                //values = vae.reconstructionLogProbability(..., 1);
-                // da darf ich nicht step reinstecken, sondern vermutlich die Aktivierung am 
-                // Eingang des VAEs
-                //INDArray prob = vae.reconstructionLogProbability(Nd4j.create(step), 1);
-                //result[0][f] = prob.getDouble(0);
-            }
-        }
-        return result;
-   }
-   
-   /**
-    * fft.
-    * 
-    * After our tumbling count window is filled we apply fast Fourier 
-    * transformation (FFT) to obtain the frequency spectrum of the signals.<p>
-    * 
-    * @param x input
-    * @return fft
-    */
-   /*public static double[] fft(double[] x){
-        DoubleFFT_1D fftDo = new DoubleFFT_1D(x.length);
-        double[] fft = new double[x.length];
-        System.arraycopy(x, 0, fft, 0, x.length);
-        fftDo.realForward(fft);
-        return fft;
-   }*/
-   
+  
     /**
     * Train the net.
     *
@@ -573,12 +439,13 @@ public class LSTMBasedAnomalyDetector {
     * 3 Spalten geben, je eine für eine der 3 Dimensionen eines Beschleunigungssensors, 
     * ausserdem gibt es eine dimension für die Zahl der examples.
     * @param fileName
+    * @return 
     * 
     */
-   public void train(double[][][] window, String fileName){
-      normalize(window);
+   public double train(double[][][] window, String fileName){
+      MathUtils.normalize(window);
       double[] flat = ArrayUtil.flattenDoubleArray(window);
-      int[] shape = new int[]{window.length, window[0].length, window[0][0].length};	
+      int[] shape = new int[]{window.length, window[0].length, window[0][0].length};	// 50, 1, 100
       INDArray input = Nd4j.create(flat,shape,'c');
       
       // inputdata, expected output values, or labels
@@ -586,99 +453,16 @@ public class LSTMBasedAnomalyDetector {
       // aber vermutlich macht das keinen Unterschied.
       net.fit(input, input);
       windowsTrained++;
-      double[][] plotwindow = new double[1][window[0][0].length];
-      for (int f=0;f<window[0][0].length;f++){
-        plotwindow[0][f] = window[0][0][f];
-      }
-      //PlotUtils.createChart(fileName, plotwindow, new String[]{"orig"});
+      return net.score();
+      // funktioniert nicht, vermutlich, da ich hier keinen batch übergeben darf
+      // return net.f1Score(input,input);
     }
    
-   /**
-    * Train the net and if the net is trained additionally determine a score for 
-    * the complete time window.
-    *
-    * @param window [1][dim][windowsize]
-    * Jede Zeile hat so viele Werte wie die Fensterbreite festlegt, es könnte 
-    * 3 Spalten geben, je eine für eine der 3 Dimensionen eines Beschleunigungssensors, 
-    * ausserdem gibt es eine dimension für die Zahl der examples, die aber bisher immer
-    * eins ist.
-    * @param fileName
-    * 
-    * @return -1, if the net is not yet trained enough, else the score
-    */
-   public double applyWindowOld(double[][][] window, String fileName){
-      double result = -1;
-      normalize(window);
-      double[] flat = ArrayUtil.flattenDoubleArray(window);
-      int[] shape = new int[]{window.length, window[0].length, window[0][0].length};	
-      INDArray input = Nd4j.create(flat,shape,'c');
-      
-      if (windowsTrained < MINIMUM_COUNT_OF_TRAINING_WINDOWS){
-            // inputdata, expected output values, or labels
-            // eigentlich müssten die labels um einen frame verschoben werden
-            // aber vermutlich macht das keinen Unterschied.
-            net.fit(input, input);
-            windowsTrained++;
-            double[][] plotwindow = new double[1][window[0][0].length];
-            for (int f=0;f<window[0][0].length;f++){
-                plotwindow[0][f] = window[0][0][f];
-            }
-            //PlotUtils.createChart(fileName, plotwindow, new String[]{"orig"});
-      } else {
-            double[][] plotwindow = new double[3][window[0][0].length];
-            for (int i=0;i<window[0][0].length;i++){
-                plotwindow[0][i] = window[0][0][i];
-            }
-            // conventional autoencoder
-            if (vae == null){
-                /**
-                  * Label the probabilities of the input
-                  * input is the input to label
-                  * returns a vector of probabilities given each label.
-                  * This is typically of the form:
-                  * [0.5, 0.5] or some other probability distribution summing to one
-                  */
-                // vermutlich falsch, wie gross ist überhaupt das array?, 
-                //TODO wie bekomme ich die Aktivierung des output-layers
-                INDArray output = net.output(input/*,true*/);
-                
-                // Compute activations from input to output of the output layer
-                List<INDArray> predictedList = net.feedForward();
-                INDArray predicted = predictedList.get(predictedList.size()-1);
-                //Evaluation evaluation_validate = new Evaluation(2);
-                //evaluation_validate.evalTimeSeries(input, predicted);
-                //System.out.println(evaluation_validate.stats() ); 
-                
-                for (int i=0;i<window[0][0].length;i++){
-                    plotwindow[1][i] = output.getDouble(i);
-                    plotwindow[2][i] = predicted.getDouble(i);
-                }
-            // variational autoencoder
-            } else {
-                //INDArray latentSpaceValues = vae.activate(input, false);
-                //INDArray out = vae.generateAtMeanGivenZ(latentSpaceGrid);
-            }
-            
-            //TODO
-            // pred-orig quadrieren und auf 1 normieren und als score plottten
-            PlotUtils.createChart(fileName, plotwindow, new String[]{"orig","out","pred"});
-            
-            // für die ganze Zeitreihe, 
-            // score (loss function values) of the prediction with respect to the true labels during training
-            result = net.score(new DataSet(input,input), false);
-      }
-      return result;
-    }
    
-    public void saveModel(File file){
-        //log.info("Saving model...");
+    protected static void saveModel(File file, MultiLayerNetwork net) throws IOException {
+        // log.info("Saving model...");
         // saveUpdater: i.e., the state for Momentum, RMSProp, Adagrad etc. Save this to train your network more in the future
-        //ModelSerializer.writeModel(net, file, true);
-    }
-    public void loadModel(File file){
-        //log.info("Load model...");
-        //net = ModelSerializer.restoreMultiLayerNetwork(file);
-        //log.info("Testing...");
+        ModelSerializer.writeModel(net, file, false);
     }
     
     /**
